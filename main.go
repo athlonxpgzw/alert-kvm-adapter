@@ -18,6 +18,9 @@ type handler struct {
 
 func main() {
 	address := flag.String("listen-address", ":6725", "The address to listen on for HTTP requests.")
+	sendAddress := flag.String("send-address", "", "The address to send to.")
+	alertKey := flag.String("alertKey", "", "Firefly alert API certificate")
+	alertID := flag.String("alertId", "", "Firefly alert API ID")
 	json := flag.Bool("json", true, "enable json logging")
 	flag.Parse()
 
@@ -30,7 +33,7 @@ func main() {
 	}
 	logger = log.With(logger, "timestamp", log.DefaultTimestampUTC)
 
-	http.Handle("/", &handler{
+	http.Handle("/alert", &handler{
 		Logger: logger,
 	})
 	if err := http.ListenAndServe(*address, nil); err != nil {
@@ -55,7 +58,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	// Debug log
+	//w.WriteHeader(http.StatusNoContent)
 }
 
 func logAlerts(alerts kvm.Data, logger log.Logger) error {

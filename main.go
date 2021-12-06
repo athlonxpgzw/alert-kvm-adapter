@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	errorLog "log"
 	"net/http"
 	"os"
+	"strconv"
 
+	"github.com/athlonxpgzw/alert-kvm-adapter/pkg/firefly"
 	"github.com/athlonxpgzw/alert-kvm-adapter/pkg/kvm"
+	"github.com/athlonxpgzw/alert-kvm-adapter/pkg/metrics"
 	"github.com/go-kit/log"
 )
 
@@ -16,17 +21,18 @@ type handler struct {
 	Logger log.Logger
 }
 
+var bindAddress *string = flag.String("bindaddress", ":6725", "The address to listen on for HTTP requests.")
+var sendURL *string = flag.String("sendURL", "", "The address to send to.")
+var alertKey *string = flag.String("alertKey", "", "Firefly alert API certificate")
+var alertID *string = flag.String("alertId", "", "Firefly alert API ID")
+var logFmt *bool = flag.Bool("json", true, "enable json logging")
+
 func main() {
-	address := flag.String("listen-address", ":6725", "The address to listen on for HTTP requests.")
-	sendAddress := flag.String("send-address", "", "The address to send to.")
-	alertKey := flag.String("alertKey", "", "Firefly alert API certificate")
-	alertID := flag.String("alertId", "", "Firefly alert API ID")
-	json := flag.Bool("json", true, "enable json logging")
 	flag.Parse()
 
 	lw := log.NewSyncWriter(os.Stdout)
 	var logger log.Logger
-	if *json {
+	if *logFmt {
 		logger = log.NewJSONLogger(lw)
 	} else {
 		logger = log.NewLogfmtLogger(lw)
@@ -36,7 +42,11 @@ func main() {
 	http.Handle("/alert", &handler{
 		Logger: logger,
 	})
-	if err := http.ListenAndServe(*address, nil); err != nil {
+
+	http.Handle("/metrics", metrics.Handler())
+	http.HandleFunc("/healthz", healthzHandler)
+
+	if err := http.ListenAndServe(*bindAddress, nil); err != nil {
 		errorLog.Fatalf("failed to start http server: %v", err)
 	}
 }
@@ -55,11 +65,30 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	err = logAlerts(alerts, h.Logger)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		panic(err)
 	}
 
-	// Debug log
-	//w.WriteHeader(http.StatusNoContent)
+	sendAlert := makeFFAlert(alerts)
+	ffAlerts, err := json.Marshal(*sendAlert)
+	if err != nil {
+		errorLog.Printf("cannot encode content because of %s", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	reader := bytes.NewReader(ffAlerts)
+	ffRequest, err := http.NewRequest("POST", *sendURL, reader)
+	if err != nil {
+		errorLog.Printf("Cannot make http request because of %s", err)
+		return
+	}
+
+	client := &http.Client{}
+	ffResponse, err := client.Do(ffRequest)
+	if err != nil {
+		errorLog.Printf("Cannot Do the post request because of %s", err)
+		return
+	}
+	defer ffResponse.Body.Close()
 }
 
 func logAlerts(alerts kvm.Data, logger log.Logger) error {
@@ -77,11 +106,23 @@ func logAlerts(alerts kvm.Data, logger log.Logger) error {
 	return nil
 }
 
-/*
-func logWith(values map[string]string, logger log.Logger) log.Logger {
-	for k, v := range values {
-		logger = log.With(logger, k, v)
+func makeFFAlert(alerts kvm.Data) *firefly.Data {
+	var ffAlert firefly.Data
+	if alerts.Topic == "alert_resolved" {
+		ffAlert.Status = "resolved"
+	} else {
+		ffAlert.Status = "firing"
+		ffAlert.Name = alerts.Params.Synopsis
+		ffAlert.Desc = alerts.Params.Mesg
+		ffAlert.Level = alerts.Params.Level
 	}
-	return logger
+	ffAlert.ApplyType = "custom"
+	ffAlert.Key = *alertKey
+	ffAlert.Id = *alertID
+	ffAlert.MsgId = strconv.FormatInt(alerts.Params.AggsEventID, 10)
+	return &ffAlert
 }
-*/
+
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	io.WriteString(w, "OK\n")
+}
